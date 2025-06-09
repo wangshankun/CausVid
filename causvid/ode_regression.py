@@ -35,6 +35,11 @@ class ODERegression(nn.Module):
         if self.num_frame_per_block > 1:
             self.generator.model.num_frame_per_block = self.num_frame_per_block
 
+        self.i2v = getattr(args, "i2v", False)
+
+        if self.i2v:
+            self.generator.model.i2v = True 
+
         if args.gradient_checkpointing:
             self.generator.enable_gradient_checkpointing()
 
@@ -49,11 +54,6 @@ class ODERegression(nn.Module):
 
         self.denoising_step_list = torch.tensor(
             args.denoising_step_list, dtype=torch.long, device=device)
-
-        self.scheduler = self.generator.get_scheduler()
-        if args.warp_denoising_step:  # Warp the denoising step according to the scheduler time shift
-            timesteps = torch.cat((self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32))).cuda()
-            self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
 
         self.args = args
         self.device = device
@@ -82,11 +82,22 @@ class ODERegression(nn.Module):
                 timestep[index] = timestep[index, 0]
             return timestep
         elif self.args.generator_task == "causal_video":
-            # make the noise level the same within every motion block
-            timestep = timestep.reshape(
-                timestep.shape[0], -1, self.num_frame_per_block)
-            timestep[:, :, 1:] = timestep[:, :, 0:1]
-            timestep = timestep.reshape(timestep.shape[0], -1)
+            if self.i2v:
+                # the first frame is always kept the same
+                timestep_from_second = timestep[:, 1:]
+                timestep_from_second = timestep_from_second.reshape(
+                    timestep_from_second.shape[0], -1, self.num_frame_per_block)
+                timestep_from_second[:, :, 1:] = timestep_from_second[:, :, 0:1]
+                timestep_from_second = timestep_from_second.reshape(
+                    timestep_from_second.shape[0], -1)
+                timestep = torch.cat(
+                    [timestep[:, 0:1], timestep_from_second], dim=1)
+            else:
+                # make the noise level the same within every motion block
+                timestep = timestep.reshape(
+                    timestep.shape[0], -1, self.num_frame_per_block)
+                timestep[:, :, 1:] = timestep[:, :, 0:1]
+                timestep = timestep.reshape(timestep.shape[0], -1)
             return timestep
         else:
             raise NotImplementedError()

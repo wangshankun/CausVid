@@ -8,6 +8,7 @@ from torch.distributed.fsdp import (
     ShardingStrategy,
     FullyShardedDataParallel as FSDP
 )
+import torchvision
 from torchvision.utils import make_grid
 from datetime import timedelta, datetime
 import torch.distributed as dist
@@ -19,6 +20,7 @@ import torch
 import wandb
 import os
 
+os.environ["WANDB_MODE"] = "disabled"
 
 def launch_distributed_job(backend: str = "nccl"):
     rank = int(os.environ["RANK"])
@@ -66,7 +68,7 @@ def init_logging_folder(args):
     os.makedirs(args.output_path, exist_ok=True)
     wandb.login(host=args.wandb_host, key=args.wandb_key)
     run = wandb.init(config=OmegaConf.to_container(args, resolve=True), dir=args.output_path, **
-                     {"mode": "online", "entity": args.wandb_entity, "project": args.wandb_project})
+                     {"mode": "disabled", "entity": args.wandb_entity, "project": args.wandb_project,"resume":"allow"},)
     wandb.run.log_code(".")
     wandb.run.name = args.wandb_name
     print(f"run dir: {run.dir}")
@@ -144,7 +146,23 @@ def barrier():
         dist.barrier()
 
 
-def prepare_for_saving(tensor, fps=16, caption=None):
+def save_video_tensor(tensor, path, fps=8):
+    """
+    将 tensor 保存为视频：
+    - 支持 [B, T, 3, H, W]（5维），自动取第一个 batch
+    - 或 [T, 3, H, W]（4维）直接保存
+    """
+    if tensor.dim() == 5:
+        tensor = tensor[0]  # 取第一个 batch
+
+    tensor = (tensor * 255).clamp(0, 255).to(torch.uint8).cpu()  # 转为 0~255 uint8
+    tensor = tensor.squeeze(0) 
+    tensor = tensor.permute(0, 2, 3, 1)
+    torchvision.io.write_video(path, tensor, fps=fps)  # [T, H, W, C]
+    return tensor
+
+
+def prepare_for_saving(tensor, fps=16, caption=None, name=None):
     # Convert range [-1, 1] to [0, 1]
     tensor = (tensor * 0.5 + 0.5).clamp(0, 1).detach()
 
@@ -153,7 +171,10 @@ def prepare_for_saving(tensor, fps=16, caption=None):
         tensor = make_grid(tensor, 4, padding=0, normalize=False)
         return wandb.Image((tensor * 255).cpu().numpy().astype(np.uint8), caption=caption)
     elif tensor.ndim == 5:
+        path = "./output/" + name + ".mp4"
         # Assuming it's a video and has shape [batch_size, num_frames, 3, height, width]
-        return wandb.Video((tensor * 255).cpu().numpy().astype(np.uint8), fps=fps, format="webm", caption=caption)
+        #print(f"caption:{caption}, fps:{fps} name:{path} tensor:{tensor.shape}")
+        return save_video_tensor(tensor, path, fps)
+        #return wandb.Video((tensor * 255).cpu().numpy().astype(np.uint8), fps=fps, format="webm", caption=caption)
     else:
         raise ValueError("Unsupported tensor shape for saving. Expected 4D (image) or 5D (video) tensor.")

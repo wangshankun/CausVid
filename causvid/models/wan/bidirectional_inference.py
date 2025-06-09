@@ -24,9 +24,6 @@ class BidirectionalInferencePipeline(torch.nn.Module):
             args.denoising_step_list, dtype=torch.long, device=device)
 
         self.scheduler = self.generator.get_scheduler()
-        if args.warp_denoising_step:  # Warp the denoising step according to the scheduler time shift
-            timesteps = torch.cat((self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32))).cuda()
-            self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
 
     def inference(self, noise: torch.Tensor, text_prompts: List[str]) -> torch.Tensor:
         """
@@ -46,7 +43,8 @@ class BidirectionalInferencePipeline(torch.nn.Module):
         # initial point
         noisy_image_or_video = noise
 
-        for index, current_timestep in enumerate(self.denoising_step_list):
+        # use the last n-1 timesteps to simulate the generator's input
+        for index, current_timestep in enumerate(self.denoising_step_list[:-1]):
             pred_image_or_video = self.generator(
                 noisy_image_or_video=noisy_image_or_video,
                 conditional_dict=conditional_dict,
@@ -54,15 +52,14 @@ class BidirectionalInferencePipeline(torch.nn.Module):
                     noise.shape[:2], dtype=torch.long, device=noise.device) * current_timestep
             )  # [B, F, C, H, W]
 
-            if index < len(self.denoising_step_list) - 1:
-                next_timestep = self.denoising_step_list[index + 1] * torch.ones(
-                    noise.shape[:2], dtype=torch.long, device=noise.device)
+            next_timestep = self.denoising_step_list[index + 1] * torch.ones(
+                noise.shape[:2], dtype=torch.long, device=noise.device)
 
-                noisy_image_or_video = self.scheduler.add_noise(
-                    pred_image_or_video.flatten(0, 1),
-                    torch.randn_like(pred_image_or_video.flatten(0, 1)),
-                    next_timestep.flatten(0, 1)
-                ).unflatten(0, noise.shape[:2])
+            noisy_image_or_video = self.scheduler.add_noise(
+                pred_image_or_video.flatten(0, 1),
+                torch.randn_like(pred_image_or_video.flatten(0, 1)),
+                next_timestep.flatten(0, 1)
+            ).unflatten(0, noise.shape[:2])
 
         video = self.vae.decode_to_pixel(pred_image_or_video)
         video = (video * 0.5 + 0.5).clamp(0, 1)

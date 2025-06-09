@@ -54,6 +54,11 @@ class DMD(nn.Module):
         if self.num_frame_per_block > 1:
             self.generator.model.num_frame_per_block = self.num_frame_per_block
 
+        self.i2v = getattr(args, "i2v", False)
+
+        if self.i2v:
+            self.generator.model.i2v = True 
+
         self.real_score = get_diffusion_wrapper(
             model_name=self.real_model_name)()
         self.real_score.set_module_grad(
@@ -97,10 +102,6 @@ class DMD(nn.Module):
         self.denoising_loss_func = get_denoising_loss(
             args.denoising_loss_type)()
 
-        if args.warp_denoising_step:  # Warp the denoising step according to the scheduler time
-            timesteps = torch.cat((self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32))).cuda().cuda()
-            self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
-
         if getattr(self.scheduler, "alphas_cumprod", None) is not None:
             self.scheduler.alphas_cumprod = self.scheduler.alphas_cumprod.to(
                 device)
@@ -127,10 +128,21 @@ class DMD(nn.Module):
             return timestep
         elif type == "causal_video":
             # make the noise level the same within every motion block
-            timestep = timestep.reshape(
-                timestep.shape[0], -1, self.num_frame_per_block)
-            timestep[:, :, 1:] = timestep[:, :, 0:1]
-            timestep = timestep.reshape(timestep.shape[0], -1)
+            if self.i2v:
+                # the first frame is always kept the same
+                timestep_from_second = timestep[:, 1:]
+                timestep_from_second = timestep_from_second.reshape(
+                    timestep_from_second.shape[0], -1, self.num_frame_per_block)
+                timestep_from_second[:, :, 1:] = timestep_from_second[:, :, 0:1]
+                timestep_from_second = timestep_from_second.reshape(
+                    timestep_from_second.shape[0], -1)
+                timestep = torch.cat(
+                    [timestep[:, 0:1], timestep_from_second], dim=1)
+            else:
+                timestep = timestep.reshape(
+                    timestep.shape[0], -1, self.num_frame_per_block)
+                timestep[:, :, 1:] = timestep[:, :, 0:1]
+                timestep = timestep.reshape(timestep.shape[0], -1)
             return timestep
         else:
             raise NotImplementedError("Unsupported model type {}".format(type))
@@ -184,7 +196,6 @@ class DMD(nn.Module):
         # Step 3: Compute the DMD gradient (DMD paper eq. 7).
         grad = (pred_fake_image - pred_real_image)
 
-        # TODO: Change the normalizer for causal teacher
         if normalization:
             # Step 4: Gradient normalization (DMD paper eq. 8).
             p_real = (estimated_clean_image_or_video - pred_real_image)
@@ -247,7 +258,7 @@ class DMD(nn.Module):
                 timestep.flatten(0, 1)
             ).detach().unflatten(0, (batch_size, num_frame))
 
-            # Step 2: Compute the KL grad
+            # Step 2: Compute the KL grad 只是推理计算
             grad, dmd_log_dict = self._compute_kl_grad(
                 noisy_image_or_video=noisy_latent,
                 estimated_clean_image_or_video=original_latent,
@@ -262,7 +273,7 @@ class DMD(nn.Module):
         else:
             dmd_loss = 0.5 * F.mse_loss(original_latent.double(
             ), (original_latent.double() - grad.double()).detach(), reduction="mean")
-        return dmd_loss, dmd_log_dict
+        return dmd_loss, dmd_log_dict#生成的dmd_loss用来指导generator的训练
 
     def _initialize_inference_pipeline(self):
         """
@@ -409,7 +420,7 @@ class DMD(nn.Module):
         The noisy input to the generator is backward simulated.
         This removes the need of any datasets during distillation.
         See Sec 4.5 of the DMD2 paper (https://arxiv.org/abs/2405.14867) for details.
-        Input:
+        Input:·
             - image_or_video_shape: a list containing the shape of the image or video [B, F, C, H, W].
             - conditional_dict: a dictionary containing the conditional information (e.g. text embeddings, image embeddings).
             - unconditional_dict: a dictionary containing the unconditional information (e.g. null/negative text embeddings, null/negative image embeddings).

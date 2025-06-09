@@ -17,18 +17,21 @@ import torch
 import wandb
 import time
 import os
+from torch.utils.tensorboard import SummaryWriter
+
 
 
 class Trainer:
     def __init__(self, config):
         self.config = config
-
+        self.tb_writer = SummaryWriter("logs/tensorboard")
         # Step 1: Initialize the distributed training environment (rank, seed, dtype, logging etc.)
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
         launch_distributed_job()
         global_rank = dist.get_rank()
+        self.rank = global_rank
 
         self.dtype = torch.bfloat16 if config.mixed_precision else torch.float32
         self.device = torch.cuda.current_device()
@@ -181,7 +184,7 @@ class Trainer:
                 unconditional_dict = self.unconditional_dict
 
         # Step 3: Train the generator
-        if TRAIN_GENERATOR:
+        if self.step % self.config.dfake_gen_update_ratio == 0:
             generator_loss, generator_log_dict = self.distillation_model.generator_loss(
                 image_or_video_shape=image_or_video_shape,
                 conditional_dict=conditional_dict,
@@ -230,7 +233,17 @@ class Trainer:
             if VISUALIZE:
                 self.add_visualization(generator_log_dict, critic_log_dict, wandb_loss_dict)
 
-            wandb.log(wandb_loss_dict, step=self.step)
+            #wandb.log(wandb_loss_dict, step=self.step)
+            for key, value in wandb_loss_dict.items():
+                if isinstance(value, torch.Tensor):
+                    if value.ndim == 0:
+                        value = value.item()
+                    else:
+                        #print(f"[TB WARNING] skip logging non-scalar: {key} shape={value.shape}")
+                        continue
+                #self.tb_writer.add_scalar(key, value, global_step=self.step)
+                print(f"{key}={value}", end=' ')
+            print(f"step={self.step}")
 
     def add_visualization(self, generator_log_dict, critic_log_dict, wandb_loss_dict):
         critictrain_latent, critictrain_noisy_latent, critictrain_pred_image = map(
@@ -241,9 +254,9 @@ class Trainer:
         )
 
         wandb_loss_dict.update({
-            "critictrain_latent": prepare_for_saving(critictrain_latent),
-            "critictrain_noisy_latent": prepare_for_saving(critictrain_noisy_latent),
-            "critictrain_pred_image": prepare_for_saving(critictrain_pred_image)
+            "critictrain_latent": prepare_for_saving(critictrain_latent, name=f"critictrain_latent_{self.step}_{self.rank}"),
+            "critictrain_noisy_latent": prepare_for_saving(critictrain_noisy_latent, name=f"critictrain_noisy_latent_{self.step}_{self.rank}"),
+            "critictrain_pred_image": prepare_for_saving(critictrain_pred_image, name=f"critictrain_pred_image_{self.step}_{self.rank}")
         })
 
         if "dmdtrain_clean_latent" in generator_log_dict:
@@ -256,10 +269,10 @@ class Trainer:
 
             wandb_loss_dict.update(
                 {
-                    "dmdtrain_clean_latent": prepare_for_saving(dmdtrain_clean_latent),
-                    "dmdtrain_noisy_latent": prepare_for_saving(dmdtrain_noisy_latent),
-                    "dmdtrain_pred_real_image": prepare_for_saving(dmdtrain_pred_real_image),
-                    "dmdtrain_pred_fake_image": prepare_for_saving(dmdtrain_pred_fake_image)
+                    "dmdtrain_clean_latent": prepare_for_saving(dmdtrain_clean_latent, name=f"dmdtrain_clean_latent_{self.step}_{self.rank}"),
+                    "dmdtrain_noisy_latent": prepare_for_saving(dmdtrain_noisy_latent, name=f"dmdtrain_noisy_latent_{self.step}_{self.rank}"),
+                    "dmdtrain_pred_real_image": prepare_for_saving(dmdtrain_pred_real_image, name=f"dmdtrain_pred_real_image_{self.step}_{self.rank}"),
+                    "dmdtrain_pred_fake_image": prepare_for_saving(dmdtrain_pred_fake_image, name=f"dmdtrain_pred_fake_image_{self.step}_{self.rank}")
                 }
             )
 
